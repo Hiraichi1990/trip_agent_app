@@ -3,6 +3,9 @@ from autogen_agentchat.conditions import TextMentionTermination
 from autogen_agentchat.teams import RoundRobinGroupChat
 from autogen_agentchat.ui import Console
 from autogen_ext.models.openai import OpenAIChatCompletionClient
+from autogen_agentchat.agents import UserProxyAgent
+from autogen_core.tools import FunctionTool
+from yahooquery import Ticker
 import os
 import getpass
 import asyncio
@@ -13,8 +16,39 @@ load_dotenv()
 
 api_key = os.environ["OPENAI_API_KEY"]
 
+def get_exchange_rate(currency_code: str) -> dict:
+    '''
+    指定した国の通貨と日本円（JPY）の為替レートを取得する。
+
+    Args:
+        currency_code (str): 通貨コード（例: "USD", "EUR", "GBP"）
+
+    Returns:
+        dict: 為替レート情報（通貨ペア、レート、取得時間）
+    '''
+    symbol = f"{currency_code}JPY=X" # 例: "USDJPY=x"
+    ticker = Ticker(symbol)
+    data = ticker.price[symbol]
+
+    if "regularMarketPrice" in data:
+        return {
+            "currency_pair": f"{currency_code}/JPY",
+            "exchange_rate": data["regularMarketPrice"],
+            "timestamp": data["regularMarketTime"]
+        }
+    else:
+        return {"error": "為替レートが取得できませんでした。"}
+
+# rate_info = get_exchange_rate("USD") # USD/JPYのレート取得
+# print(rate_info)
+
+# Function Callingとして定義
+get_exchange_rate_tool = FunctionTool(
+    get_exchange_rate, description = "現在の為替レートを取得します。"
+)
+
 model_client = OpenAIChatCompletionClient(model = os.environ["OPENAI_API_MODEL"])
-# 一つ目のエージェント：予定の全体をプランするエージェントplanner_agentを定義
+# 予定の全体をプランするエージェントplanner_agentを定義
 planner_agent = AssistantAgent(
     "planner_agent",
     model_client,
@@ -22,7 +56,7 @@ planner_agent = AssistantAgent(
     system_message = "あなたは、ユーザーのリクエストに基づいて旅行プランを提案できる便利なアシスタントです。",
 )
 
-# 二つ目のエージェント：訪問先の観光地やアクティビティを提案するエージェントlocal_agentを定義
+# 訪問先の観光地やアクティビティを提案するエージェントlocal_agentを定義
 local_agent = AssistantAgent(
     "local_agent",
     model_client,
@@ -30,7 +64,7 @@ local_agent = AssistantAgent(
     system_message = "あなたは、本物で興味深い現地のアクティビティや訪問する場所をユーザーに提案し、提案されたコンテキスト情報を利用できる便利なアシスタントです。",
 )
 
-# 三つ目のエージェント：訪問先の公用語について教えてくれるエージェントlanguage_agentを定義
+# 訪問先の公用語について教えてくれるエージェントlanguage_agentを定義
 language_agent = AssistantAgent(
     "language_agent",
     model_client,
@@ -38,7 +72,15 @@ language_agent = AssistantAgent(
     system_message = "あなたは、旅行計画を検討し、特定の目的地での公用語やコミュニケーションの課題に対処する最善の方法に関する重要なヒントについてフィードバックを提供できる便利なアシスタントです。計画に言語に関するヒントがすでに含まれている場合は、その計画が満足のいくものであることを根拠を添えて言及できます。",
 )
 
-# 四つ目のエージェント：上記３つのエージェントの提案をサマリーし最終的な旅程を提案するエージェントtravel_summary_agentを定義
+exchange_agent = AssistantAgent(
+    "exchange_agent",
+    model_client,
+    description = "訪問先での通貨に関する情報を提供できる便利なアシスタント",
+    system_message = "あなたは、旅行計画の中にある訪問先での通貨と日本円の為替レートをget_exchange_rate_toolを使って提供できる便利なアシスタントです。",
+    tools = [get_exchange_rate_tool]
+)
+
+# 上記のエージェントの提案をサマリーし最終的な旅程を提案するエージェントtravel_summary_agentを定義
 travel_summary_agent = AssistantAgent(
     "travel_summary_agent",
     model_client,
@@ -46,18 +88,23 @@ travel_summary_agent = AssistantAgent(
     system_message = "あなたは、他のエージェントからの提案やアドバイスをすべて取り入れ、詳細な最終的な旅行計画を提供できる、役に立つアシスタントです。最終計画が統合され、完全であることを確認する必要があります。最終的な対応は完全な計画でなければなりません。計画が完了し、すべてのパースペクティブが統合されたら、TERMINATE で応答できます。",
 )
 
-# エージェントの出力に TERMINATE という文字が入っている場合に会話終了
-termination = TextMentionTermination("TERMINATE")
+# グループチャットの最後に必ずこのUserProxyAgentに処理が渡されユーザーの入力を求める
+user_proxy = UserProxyAgent("user_proxy", input_func=input)
 
-# 各メッセージの後に次のエージェントを選択し、順番にメッセージを送信する
-async def SendRequest():
+# エージェントの処理が終了した際のキーワードを設定
+termination = TextMentionTermination("APPROVE")
+
+async def send_request():
+    '''
+    各メッセージの後に次のエージェントを選択し、順番にメッセージを送信する
+    プロンプトを設定し、旅程のリクエスト
+    '''
     group_chat = RoundRobinGroupChat(
-        [planner_agent, local_agent, language_agent, travel_summary_agent],
+        [planner_agent, local_agent, language_agent, exchange_agent, travel_summary_agent],
         termination_condition = termination,
         max_turns = 10 # 最大10ターンで終了
     )
 
-    # プロンプトを設定し、旅程のリクエスト
     await Console(group_chat.run_stream(task="ハワイへの3日間の旅行を計画してください。"))
 
-asyncio.run(SendRequest())
+asyncio.run(send_request())
