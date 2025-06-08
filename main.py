@@ -9,12 +9,22 @@ from yahooquery import Ticker
 import os
 import getpass
 import asyncio
+import boto3, streamlit as st
 
 # 環境変数の読み込み
 from dotenv import load_dotenv
 load_dotenv()
 
+# セッションステートの初期化
+if "messages" not in st.session_state:
+    # チャット履歴
+    st.session_state.messages = []
+if "response_buffer" not in st.session_state:
+    # 応答途中のバッファ
+    st.session_state.response_buffer = ""
+
 api_key = os.environ["OPENAI_API_KEY"]
+model_client = OpenAIChatCompletionClient(model = os.environ["OPENAI_API_MODEL"])
 
 def get_exchange_rate(currency_code: str) -> dict:
     '''
@@ -47,7 +57,6 @@ get_exchange_rate_tool = FunctionTool(
     get_exchange_rate, description = "現在の為替レートを取得します。"
 )
 
-model_client = OpenAIChatCompletionClient(model = os.environ["OPENAI_API_MODEL"])
 # 予定の全体をプランするエージェントplanner_agentを定義
 planner_agent = AssistantAgent(
     "planner_agent",
@@ -94,17 +103,33 @@ user_proxy = UserProxyAgent("user_proxy", input_func=input)
 # エージェントの処理が終了した際のキーワードを設定
 termination = TextMentionTermination("APPROVE")
 
-async def send_request():
+st.title("TripAgent")
+chat_placeholder = st.empty()
+output_lines = []
+
+async def send_request(task):
     '''
     各メッセージの後に次のエージェントを選択し、順番にメッセージを送信する
     プロンプトを設定し、旅程のリクエスト
-    '''
+'''
     group_chat = RoundRobinGroupChat(
         [planner_agent, local_agent, language_agent, exchange_agent, travel_summary_agent],
         termination_condition = termination,
         max_turns = 10 # 最大10ターンで終了
     )
 
-    await Console(group_chat.run_stream(task="ハワイへの3日間の旅行を計画してください。"))
+    # Autogenからのstreamを順次取得
+    async for msg in group_chat.run_stream(task = task):
+        # リアルタイム更新
+        with st.chat_message("assistant"):
+            st.text(msg.content)
+            await asyncio.sleep(0.05)
+            break
 
-asyncio.run(send_request())
+# 入力フォーム、実行ボタンを設定
+task = st.text_input("旅のプランを入力してください。")
+button = st.button("質問する")
+
+if button:
+    # 非同期ラッパー
+    asyncio.run(send_request(task))
