@@ -48,8 +48,9 @@ def get_exchange_rate(currency_code: str) -> dict:
         }
     else:
         return {"error": "為替レートが取得できませんでした。"}
+    return
 
-# rate_info = get_exchange_rate("USD") # USD/JPYのレート取得
+# rate = get_exchange_rate("USD") # USD/JPYのレート取得
 # print(rate_info)
 
 # Function Callingとして定義
@@ -94,11 +95,11 @@ travel_summary_agent = AssistantAgent(
     "travel_summary_agent",
     model_client,
     description = "旅行計画をまとめるのに役立つアシスタント",
-    system_message = "あなたは、他のエージェントからの提案やアドバイスをすべて取り入れ、詳細な最終的な旅行計画を提供できる、役に立つアシスタントです。最終計画が統合され、完全であることを確認する必要があります。最終的な対応は完全な計画でなければなりません。計画が完了し、すべてのパースペクティブが統合されたら、TERMINATE で応答できます。",
+    system_message = "あなたは、他のエージェントからの提案やアドバイスをすべて取り入れ、詳細な最終的な旅行計画を提供できる、役に立つアシスタントです。最終計画が統合され、完全であることを確認する必要があります。最終的な対応は完全な計画でなければなりません。",
 )
 
 # グループチャットの最後に必ずこのUserProxyAgentに処理が渡されユーザーの入力を求める
-user_proxy = UserProxyAgent("user_proxy", input_func=input)
+user_proxy = UserProxyAgent("user_proxy", input_func = input)
 
 # エージェントの処理が終了した際のキーワードを設定
 termination = TextMentionTermination("APPROVE")
@@ -110,21 +111,33 @@ output_lines = []
 async def send_request(task):
     '''
     各メッセージの後に次のエージェントを選択し、順番にメッセージを送信する
-    プロンプトを設定し、旅程のリクエスト
-'''
+    プロンプトを入力しリクエストすると、レスポンスを返す。
+    '''
+
+    # ユーザーの入力したメッセージを表示
+    with st.chat_message(task):
+        st.text(task)
+
+    # 設定したエージェントを実行
     group_chat = RoundRobinGroupChat(
         [planner_agent, local_agent, language_agent, exchange_agent, travel_summary_agent],
         termination_condition = termination,
-        max_turns = 10 # 最大10ターンで終了
+        max_turns = 3
     )
 
-    # Autogenからのstreamを順次取得
+    # 回答を出力
+    firstLoop = True
     async for msg in group_chat.run_stream(task = task):
+        if firstLoop:
+            firstLoop = False
+            continue
         # リアルタイム更新
         with st.chat_message("assistant"):
+            if not (hasattr(msg, "content")):
+                st.write("Bon voyage‼またどうぞ‼")
+                break
             st.text(msg.content)
             await asyncio.sleep(0.05)
-            break
 
 # 入力フォーム、実行ボタンを設定
 task = st.text_input("旅のプランを入力してください。")
